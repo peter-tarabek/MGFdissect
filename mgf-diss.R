@@ -4,14 +4,38 @@
 # grouping is done by applying a selected window of m/z and RT values, respectively).
 # A minimalistic user interface is provided through svDialogs package.
 
+# this script apart from combining the MFGs searches also a custom .db database
+# (SQLite, the search table must be named "ions", example included in the repo)
+# it also reduces the number of MGF items - saves the most intense ones
+
 # load the libraries
 library(readr)
 library(stringr)
 library(data.table)
+library(DBI)
 library(svDialogs)
 
-# rename files
-files <- choose.files()
+# select polarity in a list dialog
+modes <- list("POS", "NEG")
+
+polarity <- dlg_list(choices = modes, preselect = modes[[1]], title = "Select polarity")$res
+
+if (identical(polarity, character(0))) {
+  dlg_message("The script will terminate", "ok")
+  q(save = "no")
+}
+
+# choose a database
+selected_db_file <- choose.files(caption = "Select custom database")
+
+# connect to the database
+mydb <- dbConnect(RSQLite::SQLite(), selected_db_file)
+ionsTab <- dbGetQuery(mydb, 'SELECT ID, "m/z", "RT/min", ESIpolarity, Identity FROM ions')
+custom_db <- as.data.table(ionsTab)[ESIpolarity == polarity]
+dbDisconnect(mydb)
+
+# choose and rename files
+files <- choose.files(caption = "Select MGFs to merge")
 newfiles <- gsub("\\.mgf", "\\.txt", files)
 file.rename(files, newfiles)
 # ...and read them in
@@ -19,7 +43,6 @@ texty <- gsub("\r\n", "\n", lapply(newfiles, read_file)) #  the write.table func
 write.table(texty, "merged.txt", quote = FALSE, sep = "", row.names = FALSE, col.names = FALSE)
 
 test <- read_file("merged.txt")
-
 # rename the files back to .mgf
 file.rename(newfiles, files)
 
@@ -28,11 +51,10 @@ q <- unlist(str_split(test, "END IONS\r\n")) # str_split returns a 1 element lis
 
 # "END IONS" was stripped, add it to the end of every element
 s <- lapply(q, paste, "END IONS\r\n", sep="")
-
 # extract values from strings like this...
 # precursor mass
 p <- function(i) {
-  x <- str_extract(s[[i]],"PEPMASS=\\d{1,4}\\.\\d{1,}") #  use regex for PEPMASS
+  x <- str_extract(s[[i]],"PEPMASS=\\d{1,4}\\.\\d{1,}") # use regex for PEPMASS
   y <- as.numeric(unlist(str_split(x, pattern = "="))[2]) # take the second part, i.e. the numeric value
   return(y)
 }
@@ -43,7 +65,6 @@ t <- function(i) {
   y <- as.numeric(unlist(str_split(x, pattern = "="))[2]) # take the second part, i.e. the numeric value
   return(y)
 }
-
 # sum of intensities
 sumi <- function(i) {
   sum_i <- str_extract_all(s[[i]], "\\t\\d{1,}\\.\\d{1,}") # the intensity value comes always after a Tab
@@ -118,15 +139,48 @@ while (nrow(dt) > 1) {
   dt <- dt[-del_vec] # remove the just snipped out rows from dt
   # order the temp_dt by sumint highest value first
   setorderv(temp_dt, cols = "sumint", order = -1L)
+  temp_dt <- temp_dt[1] # this takes only the first row (the most intense MS/MS spectrum) from the table
   
-  # write output to text file
-  for (k in 1:nrow(temp_dt)) {
-    cat(str_remove_all(temp_dt$mgf[k], "\r"), file = "output.txt", sep = "", append = TRUE) # remove the carriage return "\r" because it introduces an extra empty line
+  # set the funcs for time interval for search in the database
+  t_low <- function(k) {
+    q <- temp_dt$time[k]/60 - (timeDelta/2)/60
+    return(q)
   }
+  t_high <- function(k) {
+    q <- temp_dt$time[k]/60 + (timeDelta/2)/60
+    return(q)
+  }
+  # set the funcs for mz interval for search in the database
+  mz_low <- function(k) {
+    q <- temp_dt$parent[k] - (ppm/2)*temp_dt$parent[k]/1000000
+    return(q)
+  }
+  mz_high <- function(k) {
+    q <- temp_dt$parent[k] + (ppm/2)*temp_dt$parent[k]/1000000
+    return(q)
+  }
+  
+  # search the database and write identified compounds to final merged .mgf
+  # get a subset of the custom_db based on RT: temp_dt$time[k] within the "timeDelta" tolerance interval/window
+  rt_win <- custom_db[`RT/min` >= t_low(1) & `RT/min` <= t_high(1)]
+  # get a subset of the previous subset based on parent m/z within the "ppm" tolerance interval/window
+  if (nrow(rt_win > 0)) {
+    mz_win <- rt_win[`m/z` >= mz_low(1) & `m/z` <= mz_high(1)]
+    if (nrow(mz_win > 0)) {
+      mut_mz_win <- mz_win[, mz_delta := abs(`m/z`- temp_dt$parent[1])]
+      arr_mut_mz_win <- mut_mz_win[order(mz_delta)]
+      ident <- arr_mut_mz_win$Identity[1]
+    } else {
+      ident <- ""
+    }
+  } else {
+    ident <- ""
+  }
+  cat(gsub("AutoMS", ident, str_remove_all(temp_dt$mgf[1], "\r")), file = "output.txt", sep = "", append = TRUE) # remove the carriage return "\r" because it introduces an extra empty line
 }
 
 # clean up...
-rm(dt, temp_dt)
+rm(dt, temp_dt, arr_mut_mz_win, mut_mz_win, mz_win, rt_win)
 
 # save the resulting merged .txt as .mgf in the same location as the original .mgfs
 brokenC <- unlist(str_split(files[1], "\\\\"))
@@ -138,5 +192,4 @@ for (i in 1:length(brokenC1)) {
   pasted <- paste0(pasted, brokenC1[i], "\\")
 }
 
-file.rename("output.txt", paste0(pasted, "merged_A.mgf"))
-
+file.rename("output.txt", paste0(pasted, "merged_D_", polarity, ".mgf"))
