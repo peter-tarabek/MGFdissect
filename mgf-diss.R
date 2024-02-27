@@ -65,7 +65,7 @@ p <- function(i) {
 
 # rt in seconds
 t <- function(i) {
-  x <- str_extract(s[[i]],"RTINSECONDS=\\d{1,4}\\.?\\d{1,}?") # in some cases RTINSECS might be without the decimal part
+  x <- str_extract(s[[i]],"RTINSECONDS=\\d{1,4}(\\.\\d{1,})?") # in some cases RTINSECS might be without the decimal part
   y <- as.numeric(unlist(str_split(x, pattern = "="))[2]) # take the second part, i.e. the numeric value
   return(y)
 }
